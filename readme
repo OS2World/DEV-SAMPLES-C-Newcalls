@@ -1,0 +1,169 @@
+Jan 22, 1997
+
+What is NEWCALLS.DLL?
+=====================
+This is an example of how to redirect (or "hook") a function
+in a dll that you don't have the code for.  My example hooks
+DosOpen() for PMMERGE.DLL.  It works under Warp 3.0 or Warp
+4.0.
+
+
+How it Works
+============
+The exe header of PMMERGE.DLL is changed so that all
+references to DOSCALLS.DLL go to NEWCALLS.DLL instead (IBM's
+compiler supplies a utility called DLLRNAME to do this).
+
+NEWCALLS.DLL contains a forwarder entry (to DOSCALLS.DLL)
+for every function exept Dos32Open().  The forwarder entries
+are created, by the linker (FWDSTAMP.EXE is NOT needed),
+because the *.def file both IMPORTS and EXPORTS all of the
+function names (except Dos32Open).
+
+Since many of the ordinals are not referenced by name (and
+are not documented),  I forward them with a manufactured
+name. Example:
+
+   _undoc4=DOSCALLS.4
+
+Since the real doscalls.dll does not export a name for
+ordinal 4, it should not make any difference what it is
+called.  The important thing is that an oridinal of 4 does
+exist,  in case pmmerge.dll uses it (it will use it by
+ordinal number, not by name).  This may seem untrustworthy,
+but you have to keep in mind we are redirecting DOSCALLS
+only for one specific piece of code (pmmerge.dll);  and if
+we get it wrong it will fail to load.
+
+Additionally,  newfwd.def IMPORTS the real Dos32Open,  for
+its own use, by ordinal (273), and calls it _Dos32Open().
+_Dos32Open() is a private name,  only seen by newcalls.dll.
+
+        _DOS32OPEN =DOSCALLS.273
+
+
+Newcalls.c only has to contain code for one function,
+Dos32Open().  All other functions are automatically
+redirected,  at load time,  to the real doscalls.dll;  thus
+there is NO runtime performance impact,  only a slight
+(probably immeasurable) loadtime impact.
+
+
+Why NEWCALLS.DLL?
+=================
+Whenever anything changes on your WPS (which can happen
+simply by referencing an object),  changes are made to
+OS2.INI and/or OS2SYS.INI. Every so often (2 mins or so)
+these changes are written to disk.  Since OS/2 2.1,  *.ini
+files are kept completely in (swappable) memory,  and are
+rewritten, in their entirety,  whenever updates are required
+(this means the system will have to swap out memory equal to
+the size of your *.ini files,  swap in the memory where the
+*.ini file data is,  write them out, etc...this design
+sucks;  I liked the way os/2 1.1 through 2.0 did it better).
+
+To further complicate things,  the *.ini file data is
+written out in chunks of 32k or less.  My os2*.ini files are
+1.2mb;  that means about 40 DosWrite's.
+
+The code for PrfOpenProfile() is in pmmerge.dll.
+PrfOpenProfile() calls DosOpen with the
+"OPEN_FLAGS_WRITE_THROUGH" bit on.  This causes each
+DosWrite() to the *.INI files to completely update all disk
+structures before it returns (this is VERY slow on HPFS).
+
+It takes a good 15-20 seconds to write my *.ini files out
+(and this happens every few mins).  Not only do I have an
+annoyingly loud harddisk,  but the performance of my PC will
+sometimes crawl while the update is taking place (a priority
+boost is giving to threads blocked on disk i/o).
+
+My replacement DosOpen() masks off the
+OPEN_FLAGS_WRITE_THROUGH bit,  so that all operations to the
+*.ini files are cached.  Now my *.ini file updates are next
+to instant (a second or so),  and a lot quieter;  file
+system structures are only updated once,  instead of after
+each DosWrite().
+
+I'm sure someone at IBM thought they were being "safe" by
+using write-through mode.  I disagree.  The *.ini files are
+actually written as "os2.!!!" and "os2sys.!!!",  then
+renamed to os2*.ini after they are on the disk.  A power
+failure will only cause a problem if it occurs when the
+*.!!! files are renamed (regardless if you're using
+newcalls.dll or not).  A power failure while the ini file
+data is being written to disk will cause the system to use
+the older *.ini files already present.  It actually makes
+more sense to write the data out as fast as you can,  to get
+ahead of the power failure.
+
+
+How to use NEWCALLS.DLL
+=======================
+
+ 1) Compile/link newcalls.c using IBM's compiler (the IBM
+    linker is key; it creates the forwarder entries from the
+    *.def file).  Simply:
+
+    icc /Gn /O /Fenewcalls.dll newcalls.c newfwd.def os2386.lib
+
+    [see G.CMD]
+
+ 2) Backup your original \os2\dll\pmmerge.dll.   Run:
+
+       \ibmcpp\bin\dllrname pmmerge.dll doscalls=NewCalls /q
+
+    [see T.CMD]
+
+    (You can't use the pmmerge.dll that is active;  copy it
+     somewhere else, modify the copy, boot to the command
+     line,  copy new dll to \os2\dll).
+
+    This command will change all references to DOSCALLS to
+    NEWCALLS.DLL. This only affects pmmerge.dll.  It does
+    not directly affect any programs that use pmmerge.dll.
+    Furthermore,  only DosOpen (Dos32Open actually) has
+    replacement code -- all other entry points are forwarded
+    to the real doscalls.  There is ZERO runtime performance
+    impact on forwarded calls (there is a slight LOAD time
+    impact,  as the loader does its stuff).
+
+ 3) newcalls.dll,  and the modified pmmerge.dll must be on
+    your libpath (for example \os2\dll).
+
+    Tip: - create a new dir called \newdll.
+         - Place newcalls.dll,  and the modified pmmerge.dll
+           there.
+         - Edit config.sys,  make sure the directory \newdll
+           comes before \os2\dll.
+         - Leave your original pmmerge.dll in \os2\dll (this
+           will allow Service Packs to correctly upadate
+           your system).
+         - Whenever you install a fixpak (service pack),
+           repeat steps 2 and 3.
+
+  4) (optional).  You might have noticed that newcalls.c
+    prints a few messages to file handle 2 (stderr).  If you
+    want to see these, follow this procedure:
+
+        a) Edit config.sys;  change "runworkplace" to
+           \os2\cmd.exe.
+        b) reboot (you will be in a PM session,  with an
+           open command prompt window).
+        c) enter "pmshell 2>stderr.out".  All pmshell
+           messages sent to stderr will go to this file, not
+           just messages from newcalls.dll.
+        d) To view the file while the shell is still
+           running, use "type stderr.out".
+
+
+Peter Fitzsimmons,
+President,
+A:WARE Inc (OS/2 Contracting)
+
+Voice:  905 858 3222
+
+Internet: pfitz@echo-on.net
+Internet: sol3@olc.gvc.com
+
+Copyright (C) 1997, A:WARE Inc.
